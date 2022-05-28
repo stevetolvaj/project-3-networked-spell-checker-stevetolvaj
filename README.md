@@ -1,129 +1,48 @@
-# Project-3-Fall21
-Networked Spell Checker
-# # CIS 3207 Assignment 3
 # Networked Spell Checker
-10 points
+
 ## Project Overview
-Spell checkers are useful utility programs often bundled with text editors. In this assignment, you’ll create a networked spell check server. The purpose of the assignment is to gain some exposure and practical experience with multi-threaded programming and the synchronization problems that go along with it, as well as with writing programs that communicate across networks.  
+The goal of the Networked Spell Checker program is to act as a server for clients to connect to the program and spell check words sent by them. These connections are maintained until the client disconnects. While the client is connected, the program will check words that are entered by the client and sent to the server. The server will then compare the words that were sent to a dictionary and send back the word with either “: OK” or “: MISSPELLED” to indicate the spell checking was completed. The spell checking will be completed using multiple (worker) threads.
 
-You’ll learn a bit about network sockets in lecture and lab. Much more detailed information is available in Chapter 11 of Bryant and O’Hallaron, and Chapters 57-62 in Kerrisk (see Canvas Files: Additional Textbook References).  [Beej’s Guide](http://beej.us/guide/bgnet/)  and  [BinaryTides’ Socket Programming Tutorial ](http://www.binarytides.com/socket-programming-c-linux-tutorial/) are potentially useful online resources.  
+There will also be a log file that is generated based on the worker thread's output. The log file will contain several types of data. The first type will be the time the spell check of a word was requested in seconds and microseconds. The next set of data will be the time the spell check was completed in seconds and microseconds. The last set of data will be the word that was checked with the result (OK or MISSPELLED) and the original priority of the network connection that was accepted. The output of the log will be in the multiple worker threads which will put it into a circular array log buffer. A single logger thread will then work off this buffer and write it to a file.
 
-For now, the high-level view of network sockets is that they are communication channels between pairs of processes, not unlike pipes. They differ from pipes in that a pair of processes communicating via a socket may reside on different machines, and that the channel is bi-directional.  
+The server can accept multiple different command-line arguments. The main arguments that must be supplied for the program to run are “./spell_checker <max connection buffer size> <number of threads> <0 for FIFO or 1 for random priority of connection processing>”. An example of this would be “./spell_checker 12 5 1”. The dictionary and network port number may also be specified in these arguments and must be specified before the previously mentioned arguments in any order. Both, none, or either dictionary path and/or port number may be specified. If they are not supplied, the default port used is 8889 and a dictionary.txt file is used.
 
-Much of what is considered to be “socket programming” involves the mechanics of setting up the channel (/i.e./, the socket) for communication. Once this is done, we’re left with a *socket descriptor*, which we use in much the same manner as we’ve used descriptors to represent files or pipes.  
+A client was also created for the server to accept requests from. The client.c file contains a simple client program to connect to the server that defaults to IP address 127.0.0.1 and port 8889 if no command-line arguments are used or both IP address and port must be specified. i.e. either ./client or ./client <IP><Port> must be used.
 
-In this project you will develop a server program that performs spell checking on demand. Your spell check server is to be a process that will acquire (read) sequences of words sent by clients. If a word is in its dictionary, it’s considered to be spelled properly. If not, it’s considered to be misspelled. The dictionary itself is nothing but a very long list of words stored in plain text form. On cis-linux2, one is available for your use in /usr/share/dict/words. (There is a downloadable copy in the Canvas Files directory.) You are not required to do any more sophisticated matching, for example, recognizing that perhaps the word “derps”, which is not in the dictionary, might be the plural of “derp”, which is in the dictionary. (For the record, neither “derp” nor “derps” is in cis-linux2’s dictionary, although the dictionary does seem to include many of the forms of many words.)  
-## Server Program Operation
-**Server Main Thread**  
-Your server program should take as a command line several control parameters. The first parameter is the name of a dictionary file. If none is provided, DEFAULT_DICTIONARY is used (where DEFAULT_DICTIONARY is a named constant defined in your program). The program should also take as an argument a port number on which to listen for incoming connections. Similarly, if no port number is provided, your program should listen on DEFAULT_PORT (defined in your program).  
+## Program Design
+There will be three types of defined structures used. A client_socket will hold the socket descriptor and priority for the client. A socket_buffer will be used to contain the array of client sockets, along with pointers required for the circular buffer implementation and the pthread lock/condition variables. The log_buffer will contain an array of character arrays to contain any log output for another thread to work on.
 
-Three other parameters are the number of element cells in the ‘connection buffer’, the number of worker threads, and the scheduling type for spell checking. These parameters are discussed in this document.
+The first step of the program functioning is to accept the command line arguments and store the values in memory. Then the circular array buffers, thread condition/lock, and network variables will be
+initialized/declared. The default/specified dictionary will also be loaded into memory using a load_dictionary() function. Afterward, the number of worker threads specified by the command line will be generated into an array. The program will bind to the localhost address 127.0.0.1. This will allow communication with the clients and these connections will be stored in the circular array buffer along with a priority number (if FIFO priority, the priority variables will be in ascending order).The program will listen for new client connections and put them into the connection circular buffer.
 
-The server will have two functions: 1) accept and distribute connection requests from clients, and 2) construct a log file of all spell check activities.
+The connection circular socket_buffer will be used to store client connection descriptors along with their priority as structs. If the socket_buffer is full the put_socket() function will use the pthread condition variable to wait until the get_socket() function removes a client_socket from the buffer and vice versa. Whenever these two functions are trying to access the socket_buffer, they will be pthread locked until completed to avoid any unwanted behavior. The log_buffer will be implemented in the same way except will store an array of strings to be printed to a file.
 
-When the **server** starts, the main thread opens the dictionary file and reads it into some data structure accessible by all of the threads in the program. It also creates a fixed-sized data structure which will be used to store the socket descriptor information of the clients that will connect to it. The number of elements in this data structure (shared buffer) is specified by a program input parameter. The main thread creates a pool of worker threads (the number of threads specified as a program parameter), and then the main thread immediately begins to behave in the following manner (to accept and distribute connection requests):   
+The worker threads will be using a function called worker(). Each thread running this function will continue to run until the program is completed and can wait until a client_socket is available due to using pthread condition variables within the get_socket() function. Once a client_socket is available to the worker thread it will be used to read the word that was sent to be spell-checked by the client. At this point, the time of this request is saved for the log. This word is input into a function that compares the word to the dictionary (check_dictionary(word)) and will return 1 if the word is found or 0 if not. If the word is found “: OK” is concatenated to the end or “: MISSPELLED” if it was not. Immediately after the concatenated word is sent back to the client. The completed time is saved for the log and a string of the log results is put into the log buffer (REQUEST_TIME_SECONDS, REQUEST_TIME_MICRO_SECONDS, COMPLETED_TIME_SECONDS, COMPLETED_TIME_MICRO_SECONDS, SPELLING_RESULT, PRIORITY). The word and result variables are then set to null and 0 to be ready for the next word that arrives.
 
-while (true) {  
-   connected_socket = accept(listening_socket);  
-   add connected_socket to the work queue;  
-   signal any sleeping workers that there’s a new socket in the queue;  
-}  
+The logger() function will be used by the single thread to write the log file. As log data is added into the log_buffer, the log thread will write this to the file until the program terminates.
 
-A second server thread will monitor a log queue and process entries by removing and writing them to a log file.  
+## Testing, Results, and Debugging
+This program was created in multiple different parts and then incrementally combined to avoid excessive debugging. The first part of the program that was created was the circular buffer using only integers to test its functionality. This was done by using a for loop to populate the buffer and then also to remove the elements from the buffer.
 
-while (true) {  
-   &nbsp;&nbsp;while (the log queue is NOT empty) {  
-       &nbsp;&nbsp;&nbsp;&nbsp;remove an entry from the log  
-       &nbsp;&nbsp;&nbsp;&nbsp;write the entry to the log file  
-    &nbsp;&nbsp;}  
- }  
+The next part of the process was implementing all pthread variables and functions needed for the worker threads and logger thread to work correctly with the buffers. First locks and condition variables were added into the put and get functions of the log and connection buffers. Afterward, an array was populated with several threads. During the first run a loop was used to fill the buffer while the worker threads worked on the data and removed them, no issues came up. To test the upper wait bound of the main thread filling the buffer a thread sleep(1) was added into the worker thread function to slow how fast they consumed the data. Then the opposite was done, where the main thread producer loop had a thread sleep(1) added. This also worked well showing the pthread conditional variables were working correctly. After testing all the above we could use the same logic to implement both the socket_buffer and log_buffer and know they will function correctly and in the correct priority.
 
-**Connection Buffer Data**  
-The cells in the connection buffer are filled by the main server thread. The cells are processed by the worker threads. Each cell is to contain the connection socket, the time at which the connection socket was received, and the priority of the request.
+The next function tested was reading the dictionary from a default file or a path specified through the command line and the spell checking of a word to the dictionary in memory. Reading the file and storing it was fairly simple and then using a while loop to compare the word specified by the client would return a result if found or not found.
 
-The priority of the request is determined by the server when the request is received by the server. The main server thread will randomly choose a priority between 1 (low) and 10 (high) for a priority value. The priority value is for use in the second type of worker processing described below.
+The worker thread function was then changed to implement these functions above by first making sure the client_sockets would be removed from the circular buffer and words would be read by the server and printed to the console and back to the client. Once this was successful the check_dictionary() function would be used to compare the words and return an OK result or MISSPELLED result to the client. A log string would also be added to the log buffer for the log thread to simply write to a file as the worker threads produced the data.
 
-**Worker Thread**  
-A server worker thread’s main loop is as follows:  
-while (true) {  
-    &nbsp;&nbsp;while (the work queue is NOT empty) {  
-      &nbsp;&nbsp;&nbsp;&nbsp;remove a socket from the queue  
-      &nbsp;&nbsp;&nbsp;&nbsp;notify that there’s an empty spot in the queue  
-      &nbsp;&nbsp;&nbsp;&nbsp;service client  
-      &nbsp;&nbsp;&nbsp;&nbsp;close socket  
-      &nbsp;&nbsp;}  
-}    
+One last functionality that was tested was proper parsing of the command line arguments. This was done using print statements to make sure they were being checked for errors. Another function was created called is_numeric that will loop through each character and check for isdigit(). If not, a digit it returns 0 right away. This is used to be able to differentiate between the dictionary file path argument and the port number. This allows the dictionary and port number arguments to be used interchangeably. If any command-line argument does not match a prompt is printed and the program exits.
 
-and the client servicing logic is:  
-while (there’s a word left to read) {  
-   read word from the socket  
-   if (the word is in the dictionary) {  
-      echo the word back on the socket concatenated with “OK”;  
-   } else {  
-      echo the word back on the socket concatenated with “MISSPELLED”;  
-   }  
-   &nbsp;&nbsp;write the word and the socket response value (“OK” or “MISSPELLED”) to the log queue;  
-}    
+## Results of Testing and Priority of Clients
+The results of the testing were done using the custom client that was created, netcat using different ports, along with running the server on a cloud and local computer. All these types of testing reproduced the same results.
 
-We quickly recognize this to be an instance of the Producer-Consumer Problem that we have studied in class. The work queue is a shared data structure, with the main thread acting as a producer, adding socket descriptors to the queue, and the worker threads acting as consumers, removing socket descriptors from the queue. Similarly, the log queue is a shared data structure, with the worker threads acting as producers of results into the buffer and a server log thread acting as a consumer, removing results from the buffer. Because we have concurrent access to these shared data structures, we must synchronize access to them using the techniques that we’ve discussed in class so that: 1) each client is serviced, and 2) the queues do not become corrupted.   
+The clients that entered the socket_buffer were affected if the max buffer size was less than the number of connections queued. If any connections were waiting, they would be waiting until enough clients were consumed from the socket_buffer. This meant that if a client was waiting and a word was sent for spell checking there would also be no result until it was able to be consumed by a worker thread. Once it was able to be consumed it would then read all words and produce results along with printing to the log file.
 
-**Spell Processing**  
-One of the parameters for program control is the type of spell processing. There are two types. The first type is strict sequential processing of client requests in the shared buffer. In this mode, the server inserts socket descriptions into the buffer in the order received. Worker threads remove the socket descriptors in FIFO order from the buffer.  
+If the number of threads was reduced below how many clients have connected a similar issue like the previous one would occur. When the socket_buffer is too small the main thread would be forced to wait and this would fill the backlog of the network socket bind function. If there were not enough threads in comparison to the number of clients the buffer would fill too quickly and would still cause a backlog of clients waiting to connect.
 
-In the second type of processing, a worker thread finds the highest priority request and removes and processes that client information from the queue.  
+The priority of the connections only affects the output by there being enough threads to accept the client sockets. If there are enough threads the priority of the output is based on which client sends a word to the server first. If there is a backlog due to the queue not being big enough then the priority would make an impact by only allowing spell checking to occur with the clients that are assigned to a worker thread. If they are not high enough priority they will wait and still accept words to stdin but nothing will be processed.
+## Discussion and Analysis
+Many important concepts should be kept in mind while using concurrency and using socket programming. It is very important to use multiple threads when working with multiple clients to be efficient or they will sit and wait until the first one’s job is done. When using concurrency with sockets, it makes it very useful to process data from multiple sources. Using different buffer and max thread counts impacts performance differently. It may be important to find a balance when dealing with limited system resources. Such as allocating fewer threads and buffer size when system resources are limited or using more buffer size and threads if performance is important.
 
-Once the spelling has been checked and the response sent to the client, the worker thread will create an entry in the log buffer. The log buffer entry is to contain the arrival time of the request, the time the spell check was completed, the word checked, the result of the spell check and the priority of the request.  
+It was very easy to see the key differences between the producers (main) thread and the consumers (worker) threads when they were out of balance. During the testing and debugging phase I used thread sleep to either put the producer or consumer threads to sleep to test the wait conditions when the buffer was full or empty. The dramatically showed if the producer is slower than the consumer the buffer will be empty most of the time and vice versa.
 
-## Synchronization  
-**correctness**  
-Only a single thread at a time may manipulate the work queue. We’ve seen that this can be guaranteed through the proper use of mutual exclusion. Your solution should include attempts at synchronization using **locks and condition variables**.  
-
-No more than one worker thread at a time should manipulate the log queue at any one time. This can be ensured through the proper use of mutual exclusion. Again, attempts at synchronization should be using **locks and condition variables**.  
-
-**Efficiency**  
-A producer should not attempt to produce if the queue is full, nor should consumers attempt to consume when the queue is empty. When a producer attempts to add to the queue and finds it full, it should cease to execute until notified by a consumer that there is space available. 
-
-Similarly, when a consumer attempts to consume and finds the queue empty, it should cease to execute until a producer has notified it that a new item has been added to the queue. As we’ve seen in class, locks and condition variables can be used to achieve this. Your solution should not involve thread yields or sleeps.  
-
-**The Dictionary**  
-We need to be very careful about how we access the work queue, but what about the dictionary? Is the dictionary not a shared resource that is accessed concurrently? Does it not require protection?  
-
-Once the dictionary is loaded into memory, it is only read by the worker threads, not modified, so we don’t need to protect it with mutual exclusion.  
-
-## Code Organization  
-Concurrent programming is tricky. Don’t make it any trickier than it needs to be. Bundle your synchronization primitives along with the data they’re protecting into a struct, define functions that operate on the data using the bundled synchronization primitives, and access the data only through these functions. In the end, we have something in C that looks very much like the Java classes you’ve written in 1068 and 2168 with some “private” data and “public” methods, or like monitor functions. Code and some very good advice can be found in Bryant and O’Hallaron Chapter 11.  
-
-## Testing your program  
-At the beginning, as you are developing your server, you’ll probably run the server and a client program on your own computer. When doing this, your server’s network address will be the /loopback address/ of 127.0.0.1. (do some research on this).  
-
-You may write a basic client to test your server, however, you are not required to submit one for the assignment (see extra credit for developing a client). You could also use the Unix telnet client, which, in addition to running the telnet protocol, can be used to connect to any TCP port, or you could use a program such as  [netcat](https://en.wikipedia.org/wiki/Netcat) . You will need to use a client to test and demonstrate your solution.  
-
-You’re also welcome to use  [this very basic Python client](https://cis.temple.edu/~jfiore/2017/spring/3207/assignments/spell_check/files/spell_check_cli.py) .  
-
-Once you’re ready to deploy your program on a real network, please restrict yourself to the nodes on cis-linux2( [system list](https://cis.temple.edu/~jfiore/2017/spring/3207/assignments/spell_check/cis-linux2_system_list) ). Start an instance of your server on one of the cis-linux2 systems and _run multiple simultaneous instances_ of a client on other systems.  
-
-You should use many instances of clients requesting spell check services at the same time (for the demo, use of multiple clients is required). These clients should be run from more than 1 computer system simultaneously, i.e., each client computer system should run many client instances at the same time. Your testing and demonstration should show this.  
-
-The server program has options for buffer size and number of worker threads as parameters. **You must use variations in these parameters to demonstrate that you are able to ensure proper synchronization and performance under varying loads of requests**.  
-
-
-## There will be **weekly deliverables** and they are to be **submitted to Canvas** as well.  
-
-WEEK 1  
-Create main server thread, worker threads and log manager thread.  
-Create buffer and management for socket descriptors from main server thread  
-Create management of socket descriptors by worker threads  
-Create main thread socket for listening for incoming requests from clients  
-
-Week 2  
-Create client send request socket for communication with main server thread  
-Create worker thread insertion in the log buffer  
-Create worker thread communication with the client for spell checking  
-
-Week 3  
-Create worker thread spell checking  
-Create log manager thread updates to log file  
-Create client generation and processing of words to spell  
-Testing with single and multiple clients and varied intervals of requests for spell check  
-Project completion and submission for demo   If none is provided, DEFAULT_DICTIONARY is used (where DEFAULT_DICTIONARY is a named constant defined in your program). The program should also take as an argument a port number on which to listen for incoming connections. Similarly, if no port number is provided, your program should listen on DEFAULT_PORT (defined in your program).  
-
+When analyzing the priority, it was also interesting to notice that it only made a difference on what clients would get results back from the server. The client was able to initially connect but would then fill the buffer and any other ones would be in the actual socket backlog built into the socket programming library.
